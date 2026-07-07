@@ -101,7 +101,9 @@ test('renderSummary leads with the marker and verdict and ends with the BoxLite 
     headSha: 'abcdef1234',
   })
   assert.ok(body.startsWith(MARKER))
-  assert.match(body, /\*\*2 issues\*\* · `abcdef1`/)
+  assert.match(body, /📦 BoxLite review/)
+  assert.match(body, /2 issues/)
+  assert.match(body, /`abcdef1`/)
   assert.match(body, /<details><summary>1 finding outside the diff<\/summary>/)
   assert.match(body, /powered by <a href="https:\/\/boxlite\.ai">BoxLite<\/a>/)
 })
