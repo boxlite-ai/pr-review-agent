@@ -47,6 +47,10 @@ inputs:
     description: 'Optional GitHub App private key (PEM). Comments post as the App bot instead of github-actions[bot].'
     required: false
     default: ''
+  broker-url:
+    description: 'Optional BoxLite token-broker URL. Set it (with `id-token: write`) to post as the public @boxlite[bot] without holding any App key. See broker/README.md.'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -61,6 +65,27 @@ runs:
       with:
         app-id: ${{ inputs.app-id }}
         private-key: ${{ inputs.app-private-key }}
+
+    # Public branded identity: exchange this run's GitHub OIDC token for a repo-scoped
+    # @boxlite[bot] token via the broker — no App key in the caller's repo. The job must
+    # grant `id-token: write`. The token is masked and never leaves this run.
+    - name: Mint @boxlite token via broker
+      if: ${{ inputs.broker-url != '' }}
+      shell: bash
+      env:
+        BROKER_URL: ${{ inputs.broker-url }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "broker-url is set but no OIDC token is available — add 'id-token: write' to the job's permissions" >&2
+          exit 1
+        fi
+        jwt=$(curl -sf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$BROKER_URL" | jq -r '.value')
+        token=$(curl -sf -X POST "$BROKER_URL/exchange" -H "Authorization: Bearer $jwt" | jq -r '.token')
+        if [ -z "$token" ] || [ "$token" = "null" ]; then echo "broker did not return a token" >&2; exit 1; fi
+        echo "::add-mask::$token"
+        echo "BOXLITE_BOT_TOKEN=$token" >> "$GITHUB_ENV"
 
     - uses: actions/setup-node@v4
       with:
@@ -82,8 +107,8 @@ runs:
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
         MODEL: ${{ inputs.model }}
         TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
-        # App token when configured, else the job's github.token (github-actions[bot]).
-        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        # Identity precedence: broker (@boxlite[bot]) → App token → github.token.
+        GH_TOKEN: ${{ env.BOXLITE_BOT_TOKEN || steps.app-token.outputs.token || github.token }}
         EVENT_NAME: ${{ github.event_name }}
         REPO: ${{ github.repository }}
         # PR number from the pull_request payload, or the issue on an @mention comment.

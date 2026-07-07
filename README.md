@@ -76,10 +76,27 @@ By default comments post as `github-actions[bot]`. To post as your own `your-app
 The Action mints a short-lived, repo-scoped installation token from the App key via
 [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token).
 
-> The App private key is *your* master credential — keep it in secrets of repos/orgs you
-> control. To offer this to strangers without distributing the key, front it with an OIDC
-> token broker (holds only the App key, vends per-repo tokens); that is the one piece that
-> needs hosting. Everything else here is hostless.
+The App private key is *your* master credential — with `app-private-key` it lives in the
+secrets of repos/orgs **you** control. To let it stay yours while **anyone** installs the
+bot, use the broker below instead.
+
+### Public `@boxlite` bot (anyone can install)
+
+To let *anyone* install the bot and have reviews post as `@boxlite[bot]` — without handing
+your App key to every caller — run the token broker in [`broker/`](broker/README.md): a
+tiny Cloudflare Worker that holds the App key and vends a per-repo, least-privilege token
+after verifying each run's GitHub OIDC claim. Callers then just install `@boxlite` and add
+`broker-url:` (with `id-token: write`) — no App key in their repo:
+
+```yaml
+permissions: { contents: read, pull-requests: write, checks: write, id-token: write }
+steps:
+  - uses: boxlite-ai/pr-review-agent@v1
+    with:
+      boxlite-api-key: ${{ secrets.BOXLITE_API_KEY }}
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      broker-url: https://boxlite-token-broker.<you>.workers.dev
+```
 
 ## How it works
 
