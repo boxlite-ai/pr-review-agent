@@ -19,9 +19,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-// Read-only: read the tree + allowlisted git history. `git diff:*` already covers
-// `git diff --numstat` (used for the change-map LOC deltas).
-const ALLOWED_TOOLS = 'Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)'
+// Full agent inside the throwaway microVM: read the tree AND execute — install deps,
+// run the test suite, write a scratch script to reproduce a bug. Untrusted PR code only
+// ever runs HERE, in the isolated box, never on the runner (the write token was already
+// scrubbed, so git pushes fail). Tradeoff: that untrusted code shares the box with the
+// Claude key + open egress — harden later by restricting egress / a scoped key (POL-141).
+const ALLOWED_TOOLS = 'Read,Grep,Glob,Write,Bash'
 
 /** Assemble the review prompt: base policy + optional config context + PR trailer. */
 export function buildPrompt({ basePrompt, repo, pr, baseRef, shortHead, env = {} }) {
@@ -85,7 +88,7 @@ function main() {
   const shortHead = git(['-C', repoDir, 'rev-parse', '--short', 'HEAD']).trim()
   const prompt = buildPrompt({ basePrompt, repo, pr, baseRef, shortHead, env: process.env })
 
-  const args = ['-p', prompt, '--allowedTools', ALLOWED_TOOLS, '--output-format', 'json', '--max-turns', '50']
+  const args = ['-p', prompt, '--allowedTools', ALLOWED_TOOLS, '--output-format', 'json', '--max-turns', '80']
   if (process.env.MODEL) args.push('--model', process.env.MODEL)
 
   // The model runs without GH_TOKEN — it reviews from local objects and needs no remote.
