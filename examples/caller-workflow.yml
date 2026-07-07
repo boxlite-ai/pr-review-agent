@@ -6,8 +6,12 @@
 #     ANTHROPIC_API_KEY         an Anthropic Console API key (sk-ant-api…), or
 #     CLAUDE_CODE_OAUTH_TOKEN   a subscription token from `claude setup-token` (sk-ant-oat…)
 #
-# Optional branded bot (comments post as your GitHub App instead of
-# github-actions[bot]) — add these two secrets and the `with:` lines below:
+# Optional per-repo policy: add `.boxlite-review.yml` at the repo root
+#   (path_filters, path_instructions, focus, language, profile).
+#
+# Optional branded bot (comments + checks post as your GitHub App instead of
+# github-actions[bot]) — add these two secrets and the `with:` lines below. The App needs
+# Pull requests: Read/Write and Checks: Read/Write:
 #   BOXLITE_REVIEWER_APP_ID
 #   BOXLITE_REVIEWER_APP_PRIVATE_KEY
 name: boxlite-review
@@ -15,21 +19,33 @@ name: boxlite-review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Re-run on demand: comment `@boxlite review` on the PR.
+  issue_comment:
+    types: [created]
 
 # One review per PR; a force-push cancels the in-flight run.
 concurrency:
-  group: boxlite-review-${{ github.event.pull_request.number }}
+  group: boxlite-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # Skip drafts and bot-authored PRs.
-    if: ${{ !github.event.pull_request.draft && github.event.pull_request.user.type != 'Bot' }}
+    # pull_request: skip drafts and bot-authored PRs.
+    # issue_comment: only a PR comment that carries the phrase, from someone with write access.
+    if: >-
+      (github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        github.event.pull_request.user.type != 'Bot') ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@boxlite review') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      pull-requests: write # post the review comment
+      pull-requests: write # post the inline review + sticky summary
+      checks: write # publish the check run (omit if you don't want the check)
     steps:
       - uses: boxlite-ai/pr-review-agent@v1
         with:

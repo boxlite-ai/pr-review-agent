@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { MARKER, MAX_BODY_CHARS, clampBody, upsertComment } from '../payload/pr-review/post-comment.mjs'
+import { MARKER, MAX_BODY_CHARS, clampBody, upsertComment } from '../lib/comment.mjs'
 
-// A fake GitHub API: records every call and replies from a scripted queue so the
-// upsert branch (PATCH existing vs POST new) and truncation are exercised without
-// touching the network.
+// A fake GitHub API: records every call and replies from a scripted queue so the upsert
+// branch (PATCH existing vs POST new) and truncation are exercised without the network.
 function fakeFetch(responses) {
   const calls = []
   const queue = [...responses]

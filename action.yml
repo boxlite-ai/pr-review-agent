@@ -1,11 +1,12 @@
 # BoxLite PR Reviewer — composite GitHub Action.
 #
-# Trigger = the caller's `pull_request` workflow. Compute = a BoxLite microVM on
-# app.boxlite.ai, booted in the caller's own org with their key. Identity = the
-# optional GitHub App bot. BoxLite never custodies the caller's keys — they live
-# in the caller's GitHub Secrets and reach the box per-exec.
+# Trigger = the caller's `pull_request` workflow, or an `@boxlite review` comment.
+# Compute = a BoxLite microVM on app.boxlite.ai, booted in the caller's own org with
+# their key. Identity = the optional GitHub App bot. Output = one inline review, one
+# sticky summary, one check run. BoxLite never custodies the caller's keys — they live in
+# the caller's GitHub Secrets and reach the box per-exec.
 name: 'BoxLite PR Reviewer'
-description: 'Review a pull request inside a BoxLite microVM with Claude Code, and post one sticky comment.'
+description: 'Review a pull request inside a BoxLite microVM with Claude Code — inline comments, a sticky summary, and a check run.'
 branding:
   icon: 'check-circle'
   color: 'purple'
@@ -34,6 +35,10 @@ inputs:
     description: 'Explicit Claude model id. Empty = Claude Code default (tracks the latest model).'
     required: false
     default: ''
+  trigger-phrase:
+    description: 'Comment phrase that re-triggers a review on an issue_comment event.'
+    required: false
+    default: '@boxlite review'
   app-id:
     description: 'Optional GitHub App id. Set together with app-private-key to post as your branded bot.'
     required: false
@@ -61,9 +66,9 @@ runs:
       with:
         node-version: '22'
 
-    - name: Install BoxLite SDK
+    - name: Install runner dependencies
       shell: bash
-      run: npm install --no-save --prefix "$GITHUB_ACTION_PATH" @boxlite-ai/boxlite@^0.9.7
+      run: npm install --no-save --prefix "$GITHUB_ACTION_PATH" @boxlite-ai/boxlite@^0.9.7 yaml
 
     - name: Review pull request
       shell: bash
@@ -76,10 +81,15 @@ runs:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
         MODEL: ${{ inputs.model }}
+        TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
         # App token when configured, else the job's github.token (github-actions[bot]).
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        EVENT_NAME: ${{ github.event_name }}
         REPO: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        # PR number from the pull_request payload, or the issue on an @mention comment.
+        PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        # Present on pull_request; empty on issue_comment (orchestrate fetches the PR then).
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         BASE_REF: ${{ github.event.pull_request.base.ref }}
+        COMMENT_BODY: ${{ github.event.comment.body }}
       run: node "$GITHUB_ACTION_PATH/orchestrate.mjs"

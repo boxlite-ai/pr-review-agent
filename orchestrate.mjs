@@ -1,20 +1,33 @@
 // BoxLite PR Reviewer — orchestrator.
 //
-// Runs on the GitHub Actions runner (thin trigger). Boots a microVM on
-// app.boxlite.ai in the caller's own org, ships the pr-review payload into it,
-// runs the review, and tears the box down. All review compute is the box; this
-// process only orchestrates. Secrets travel per-exec and are never persisted in
-// box env (box env is server-persisted and part of the warm-pool match key).
+// Runs on the GitHub Actions runner (thin trigger + trusted publisher). Boots a microVM
+// on app.boxlite.ai in the caller's own org, ships the pr-review payload into it, runs
+// the read-only review, then turns the box's structured findings into GitHub surfaces:
+// one batched inline review, one sticky summary comment, one check run. All review
+// compute is the box; all GitHub writes are here. The box never posts.
 //
 // Consumed by action.yml, which maps the GitHub event context to the env below.
 // Also runnable locally for a dry run — see pr-reviewer/README.md.
 import { JsBoxlite, BoxliteRestOptions, ApiKeyCredential, SimpleBox } from '@boxlite-ai/boxlite'
+import { parse as parseYaml } from 'yaml'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { resolveCredential } from './lib/credential.mjs'
+import { ghJson } from './lib/github.mjs'
+import { fetchConfig, isPathIncluded } from './lib/config.mjs'
+import { parseReview } from './lib/findings.mjs'
+import { upsertComment } from './lib/comment.mjs'
+import {
+  fetchChangedLines,
+  partition,
+  buildReviewComments,
+  postReview,
+  renderSummary,
+  postCheckRun,
+} from './lib/publish.mjs'
 
-// copyIn only lands files under /workspace (the box's writable workdir); a copyIn to
-// a path outside it silently no-ops. And box.stop() does not remove the box despite
+// copyIn only lands files under /workspace (the box's writable workdir); a copyIn to a
+// path outside it silently no-ops. And box.stop() does not remove the box despite
 // autoRemove — deletion needs runtime.remove(id). Both are worked around below.
 const BOX_WORKDIR = '/workspace/pr-review'
 
@@ -26,13 +39,17 @@ const {
   CLAUDE_CODE_OAUTH_TOKEN,
   MODEL,
   GH_TOKEN,
+  EVENT_NAME = 'pull_request',
+  COMMENT_BODY = '',
+  TRIGGER_PHRASE = '@boxlite review',
   REPO,
   PR_NUMBER,
-  HEAD_SHA,
-  BASE_REF,
 } = process.env
+let { HEAD_SHA, BASE_REF } = process.env
 
-const required = { BOXLITE_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, BASE_REF }
+// Always required; HEAD_SHA/BASE_REF come from the pull_request payload or, for an
+// issue_comment re-trigger, are fetched from the PR below.
+const required = { BOXLITE_API_KEY, GH_TOKEN, REPO, PR_NUMBER }
 const missing = Object.entries(required)
   .filter(([, value]) => !value)
   .map(([key]) => key)
@@ -50,9 +67,37 @@ try {
   process.exit(1)
 }
 
+// An `@boxlite review` comment re-triggers a review. Skip cleanly if the phrase is absent
+// (defense-in-depth; the workflow `if:` should already gate this), and resolve the PR's
+// head/base since the comment payload carries neither.
+if (EVENT_NAME === 'issue_comment') {
+  if (!COMMENT_BODY.includes(TRIGGER_PHRASE)) {
+    console.log(`comment does not contain "${TRIGGER_PHRASE}"; nothing to do`)
+    process.exit(0)
+  }
+  const pull = await ghJson(`/repos/${REPO}/pulls/${PR_NUMBER}`, { token: GH_TOKEN })
+  HEAD_SHA = pull.head.sha
+  BASE_REF = pull.base.ref
+}
+
+if (!HEAD_SHA || !BASE_REF) {
+  console.error('could not resolve HEAD_SHA / BASE_REF for this event')
+  process.exit(1)
+}
+
+// Optional per-repo policy at the PR head.
+const config = await fetchConfig({ repo: REPO, ref: HEAD_SHA, token: GH_TOKEN, parseYaml })
+const pathInstructions = config.path_instructions
+  .map((p) => `For files matching ${p.path}: ${p.instructions}`)
+  .join('\n')
+const ignoreGlobs = config.path_filters
+  .filter((f) => f.startsWith('!'))
+  .map((f) => f.slice(1))
+  .join(', ')
+
 const here = path.dirname(fileURLToPath(import.meta.url))
 const payloadDir = path.join(here, 'payload', 'pr-review')
-const PAYLOAD_FILES = ['run.sh', 'prompt.md', 'post-comment.mjs']
+const PAYLOAD_FILES = ['review.mjs', 'prompt.md']
 
 const runtime = JsBoxlite.rest(
   new BoxliteRestOptions({
@@ -107,22 +152,86 @@ try {
   for (const file of PAYLOAD_FILES) {
     await box.copyIn(path.join(payloadDir, file), `${BOX_WORKDIR}/${file}`)
   }
-  await box.exec('chmod', '+x', `${BOX_WORKDIR}/run.sh`)
 
+  // Run the read-only review inside the box; it prints the review JSON to stdout.
+  // Secrets travel per-exec (never in box env). GH_TOKEN is used only to clone and is
+  // scrubbed before the model runs — the box performs no GitHub writes.
+  const boxEnv = {
+    GH_TOKEN,
+    ...credential.env,
+    ...(MODEL ? { MODEL } : {}),
+    ...(config.profile ? { PROFILE: config.profile } : {}),
+    ...(config.focus ? { FOCUS: config.focus } : {}),
+    ...(config.language ? { LANGUAGE: config.language } : {}),
+    ...(pathInstructions ? { PATH_INSTRUCTIONS: pathInstructions } : {}),
+    ...(ignoreGlobs ? { IGNORE_GLOBS: ignoreGlobs } : {}),
+  }
   const result = await box.exec(
-    'bash',
-    [`${BOX_WORKDIR}/run.sh`, REPO, PR_NUMBER, HEAD_SHA, BASE_REF],
-    { GH_TOKEN, ...credential.env, ...(MODEL ? { MODEL } : {}) },
+    'node',
+    [`${BOX_WORKDIR}/review.mjs`, REPO, PR_NUMBER, HEAD_SHA, BASE_REF],
+    boxEnv,
     { timeoutSecs: 900 },
   )
-  process.stdout.write(result.stdout)
-  process.stderr.write(result.stderr)
-  exitCode = result.exitCode
+  if (result.exitCode !== 0) {
+    process.stderr.write(result.stderr)
+    console.error(`review failed in the box (exit ${result.exitCode})`)
+    exitCode = result.exitCode
+  } else {
+    process.stderr.write(result.stderr)
+    exitCode = await publish(result.stdout)
+  }
 } finally {
   // stop() does not remove the box despite autoRemove — delete it explicitly.
   const boxId = await box.getId().catch(() => undefined)
   if (boxId) {
-    await runtime.remove(boxId).catch((error) => console.error(`failed to remove box ${boxId}: ${error?.message ?? error}`))
+    await runtime
+      .remove(boxId)
+      .catch((error) => console.error(`failed to remove box ${boxId}: ${error?.message ?? error}`))
   }
 }
 process.exit(exitCode)
+
+/**
+ * Publish the box's structured review to GitHub. The sticky summary must post (it is the
+ * reliable surface); the inline review and check run are best-effort — a permission gap on
+ * one must not sink the whole review. When inline posting fails, its findings fall back
+ * into the summary so nothing is lost.
+ */
+async function publish(reviewJson) {
+  const review = parseReview(reviewJson)
+  const changed = await fetchChangedLines({ repo: REPO, pr: PR_NUMBER, token: GH_TOKEN })
+  const isIncluded = (p) => isPathIncluded(p, config.path_filters)
+  const { inline, summaryOnly } = partition(review.findings, changed, isIncluded)
+
+  let inlinePosted = false
+  try {
+    const posted = await postReview({
+      repo: REPO,
+      pr: PR_NUMBER,
+      headSha: HEAD_SHA,
+      verdict: review.verdict,
+      comments: buildReviewComments(inline),
+      token: GH_TOKEN,
+    })
+    inlinePosted = !posted.skipped
+  } catch (error) {
+    console.error(`inline review failed (findings fall back to the summary): ${error?.message ?? error}`)
+  }
+
+  const summaryFindings = inlinePosted ? summaryOnly : [...summaryOnly, ...inline]
+  const summary = renderSummary({
+    verdict: review.verdict,
+    changeMap: review.changeMap,
+    summaryOnly: summaryFindings,
+    headSha: HEAD_SHA,
+  })
+  const upserted = await upsertComment({ repo: REPO, pr: PR_NUMBER, body: summary, token: GH_TOKEN })
+  console.log(`${upserted.action} sticky summary ${upserted.id} · ${review.verdict}`)
+
+  try {
+    await postCheckRun({ repo: REPO, headSha: HEAD_SHA, verdict: review.verdict, findings: review.findings, token: GH_TOKEN })
+  } catch (error) {
+    console.error(`check run failed (needs checks: write): ${error?.message ?? error}`)
+  }
+  return 0
+}
