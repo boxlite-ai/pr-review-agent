@@ -9,7 +9,7 @@
 // Custody note: the two keys pass through this handler once (to encrypt + write them as
 // repo secrets) and are never stored. The App private key stays in the Worker.
 import { createAppAuth } from '@octokit/auth-app'
-import _sodium from 'libsodium-wrappers'
+import sealedbox from 'tweetnacl-sealedbox-js'
 import { BrokerError } from './claims.mjs'
 
 const GH = 'https://api.github.com'
@@ -49,16 +49,16 @@ async function gh(path, token, init = {}) {
 }
 
 // GitHub Actions secrets must be libsodium sealed-box encrypted with the repo's public key.
-async function seal(value, publicKeyB64) {
-  await _sodium.ready
-  const s = _sodium
-  const sealed = s.crypto_box_seal(s.from_string(value), s.from_base64(publicKeyB64, s.base64_variants.ORIGINAL))
-  return s.to_base64(sealed, s.base64_variants.ORIGINAL)
+// tweetnacl-sealedbox-js implements crypto_box_seal in pure JS (bundles on Workers; no WASM).
+function seal(value, publicKeyB64) {
+  const publicKey = Uint8Array.from(atob(publicKeyB64), (c) => c.charCodeAt(0))
+  const sealed = sealedbox.seal(new TextEncoder().encode(value), publicKey)
+  return btoa(String.fromCharCode(...sealed))
 }
 
 async function setRepoSecret(owner, repo, name, value, token) {
   const pk = await gh(`/repos/${owner}/${repo}/actions/secrets/public-key`, token)
-  const encrypted_value = await seal(value, pk.key)
+  const encrypted_value = seal(value, pk.key)
   await gh(`/repos/${owner}/${repo}/actions/secrets/${name}`, token, {
     method: 'PUT',
     body: JSON.stringify({ encrypted_value, key_id: pk.key_id }),
