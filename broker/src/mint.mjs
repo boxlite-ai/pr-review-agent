@@ -35,5 +35,5 @@ export async function mintToken({ appId, privateKey, owner, repo, permissions = 
     repositoryNames: [repo],
     permissions,
   })
-  return { token: installation.token, expiresAt: installation.expiresAt }
+  return { token: installation.token, expiresAt: installation.expiresAt, permissions: installation.permissions }
 }

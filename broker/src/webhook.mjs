@@ -41,8 +41,8 @@ async function startReview(env, url, keys, { repo, owner, name, prNumber, headSh
   try {
     const { token: writeToken } = await mintToken({ appId: env.APP_ID, privateKey: env.APP_PRIVATE_KEY, owner, repo: name, permissions: { pull_requests: 'write', metadata: 'read' } })
     await upsertComment({ repo, pr: prNumber, token: writeToken, body: IN_PROGRESS })
-  } catch {
-    /* non-fatal — the review still runs and posts the result */
+  } catch (e) {
+    console.error(`[startReview] in-progress comment failed (non-fatal): ${e?.stack || e?.message || e}`)
   }
 
   const { token: cloneToken } = await mintToken({

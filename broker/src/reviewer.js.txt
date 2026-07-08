@@ -8,6 +8,11 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+// The Worker fires this review and never attaches, so the exec is an "orphaned session" the
+// runner SIGHUPs after ~5 min idle. A real review runs longer than that — ignore SIGHUP so we
+// survive the reap and still POST the findings. (detach:true keeps the box itself alive.)
+process.on('SIGHUP', () => {})
+
 const E = process.env
 const BASE = `origin/${E.BASE_REF}`
 
