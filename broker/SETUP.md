@@ -4,26 +4,35 @@ Turns the reviewer into an installable GitHub App: users click **Install**, past
 BoxLite + Claude keys once, and their repos get the review workflow + secrets written
 automatically — no hand-written workflow, no per-repo secret setup.
 
-Everything here is scripted. Your part is **two authenticated clicks and one command**; the
-app-creation flow, key exchange, secret loading, and deploy are automated.
+Your part is a short App-registration form + one `wrangler login`; the PKCS#8 conversion,
+secret loading, and deploy are scripted (`deploy.sh`).
 
 ## Prerequisites
 - `gh` logged in — `gh auth status`
 - A Cloudflare account — `npx wrangler login`
 
-## 1 · Create the App — one click
-Open **`create-app.html`** in a browser → **Create GitHub App** → authenticate. It's
-pre-filled with the exact permissions (Contents/Secrets/Workflows/Pull requests/Checks) and
-settings; you only confirm. GitHub redirects to `https://boxlite.ai/app-created?code=XXXX` —
-copy the `code`.
+## 1 · Create the App
+**Settings → Developer settings → GitHub Apps → New GitHub App** (org:
+`github.com/organizations/<org>/settings/apps/new`). Fill in:
+- **Name** `boxlite` · **Homepage URL** `https://boxlite.ai`
+- **Webhook** → uncheck **Active**
+- **Repository permissions** → **Read and write** on: Contents, Secrets, Workflows,
+  Pull requests, Checks
+- **Where can this be installed** → **Any account**
+- Click **Create GitHub App**, then **Generate a private key** (saves a `.pem`) and copy
+  the **App ID**.
+
+> Why not the `create-app.html` one-click manifest: GitHub's session cookie is `SameSite`,
+> so it isn't sent on the cross-origin manifest POST — the App can't be created that way.
+> Use the form above.
 
 ## 2 · Deploy the broker — one command
 ```
 cd broker
-bash deploy.sh XXXX
+npx wrangler login                                  # once
+bash deploy.sh <APP_ID> <path-to-private-key.pem>
 ```
-Exchanges the code for the App ID + private key, loads them as Worker secrets, deploys, and
-prints your Worker URL.
+Loads APP_ID + the key as Worker secrets, deploys, and prints your Worker URL.
 
 ## 3 · Point the App at the broker — one field
 The script prints the exact link + value. In the App settings set
