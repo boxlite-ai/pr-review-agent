@@ -36,7 +36,7 @@ jobs:
       - uses: ./
         with:
           boxlite-api-key: ${{ secrets.BOXLITE_API_KEY }}
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # These two are what give you the real branded bot:
           app-id: ${{ secrets.BOXLITE_REVIEWER_APP_ID }}
           app-private-key: ${{ secrets.BOXLITE_REVIEWER_APP_PRIVATE_KEY }}
