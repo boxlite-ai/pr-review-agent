@@ -11,6 +11,7 @@
 import { createAppAuth } from '@octokit/auth-app'
 import sealedbox from 'tweetnacl-sealedbox-js'
 import { BrokerError } from './claims.mjs'
+import { storeKeys } from './store.mjs'
 
 const GH = 'https://api.github.com'
 const WORKFLOW_PATH = '.github/workflows/boxlite-review.yml'
@@ -19,7 +20,7 @@ const WORKFLOW_PATH = '.github/workflows/boxlite-review.yml'
  * origin) + `id-token: write` make runs post as @boxlite-agent[bot]: the action exchanges
  * the run's GitHub OIDC token at the broker for a repo-scoped installation token.
  */
-function buildWorkflow(brokerUrl) {
+export function buildWorkflow(brokerUrl) {
   return `name: boxlite-review
 on:
   pull_request: { types: [opened, synchronize, reopened, ready_for_review] }
@@ -65,7 +66,7 @@ function seal(value, publicKeyB64) {
   return btoa(String.fromCharCode(...sealed))
 }
 
-async function setRepoSecret(owner, repo, name, value, token) {
+export async function setRepoSecret(owner, repo, name, value, token) {
   const pk = await gh(`/repos/${owner}/${repo}/actions/secrets/public-key`, token)
   const encrypted_value = seal(value, pk.key)
   await gh(`/repos/${owner}/${repo}/actions/secrets/${name}`, token, {
@@ -98,7 +99,7 @@ async function putWorkflow(owner, repo, token, workflow, branch) {
  * protects its default branch (409 — required PRs / status checks / merge queue), falls
  * back to a branch + pull request the maintainer merges. Returns 'committed' or 'pr'.
  */
-async function commitWorkflow(owner, repo, token, workflow) {
+export async function commitWorkflow(owner, repo, token, workflow) {
   try {
     await putWorkflow(owner, repo, token, workflow)
     return 'committed'
@@ -159,6 +160,9 @@ export async function handleSetup(request, env, url) {
     await commitWorkflow(r.owner.login, r.name, token, workflow)
     configured.push(r.full_name)
   }
+  // Persist the keys (encrypted) so repos added to this install later auto-configure via
+  // the webhook — no second trip through this form.
+  await storeKeys(env, installationId, { boxliteKey, claudeToken })
   return html(donePage(configured))
 }
 

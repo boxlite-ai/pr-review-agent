@@ -3,7 +3,15 @@
 #   wrangler secret put APP_ID
 #   wrangler secret put APP_PRIVATE_KEY   # PKCS#8 PEM — convert first, see README
 #   wrangler secret put BROKER_AUDIENCE   # this Worker's public URL, e.g. https://broker.boxlite.ai
+#   wrangler secret put STORE_SECRET      # random — encrypts stored installer keys at rest
+#   wrangler secret put WEBHOOK_SECRET    # random — must match the App's webhook secret
 name = "boxlite-token-broker"
 main = "src/index.mjs"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Encrypted per-installation key storage (option 2: broker holds the keys → zero-touch
+# auto-config of repos added after /setup, via the webhook).
+[[kv_namespaces]]
+binding = "INSTALL_STORE"
+id = "1e6ad264b43943118256f765b20ed9f3"

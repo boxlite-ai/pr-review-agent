@@ -12,6 +12,7 @@ import { verifyOidc } from './verify.mjs'
 import { resolveTarget, BrokerError } from './claims.mjs'
 import { mintToken } from './mint.mjs'
 import { handleSetup } from './setup.mjs'
+import { handleWebhook } from './webhook.mjs'
 
 export default {
   async fetch(request, env) {
@@ -20,6 +21,8 @@ export default {
       // Auto-configure: the App's post-install Setup URL — writes the secrets + review
       // workflow into the just-installed repos so the user does zero manual setup.
       if (url.pathname === '/setup') return await handleSetup(request, env, url)
+      // GitHub App webhook — auto-configure repos on install / repos-added (uses stored keys).
+      if (request.method === 'POST' && url.pathname === '/webhook') return await handleWebhook(request, env, url)
       // OIDC → short-lived @boxlite[bot] token, scoped to the caller's own repo.
       if (request.method === 'POST' && url.pathname === '/exchange') {
         return await handleExchange(request, env, url)
@@ -27,6 +30,7 @@ export default {
       return json(404, { error: 'POST /exchange or GET|POST /setup' })
     } catch (error) {
       const status = error instanceof BrokerError ? error.status : 401
+      console.error(`[broker] ${url.pathname} → ${status}: ${error.stack || error.message}`)
       return json(status, { error: error.message })
     }
   },
