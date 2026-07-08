@@ -8,12 +8,19 @@ import { loadKeys, deleteKeys } from './store.mjs'
 import { mintToken } from './mint.mjs'
 import { mintJob } from './job.mjs'
 import { createBox, startExecution } from './boxes.mjs'
+import { upsertComment, MARKER } from '../../lib/comment.mjs'
 
 const TRIGGER = '@boxlite-agent review'
 const PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review'])
 const ALLOWED_ASSOC = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']) // only maintainers may hand-trigger
 const GH = 'https://api.github.com'
 const ghHeaders = (token) => ({ Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'boxlite-agent', 'X-GitHub-Api-Version': '2022-11-28' })
+const IN_PROGRESS = `${MARKER}
+### 📦 BoxLite review — in progress…
+
+Spinning up a disposable BoxLite microVM and running Claude on this PR — installing deps, running the tests, and checking the diff. This comment will update with the findings.
+
+<sub>powered by <a href="https://boxlite.ai">BoxLite</a></sub>`
 
 async function verifySignature(secret, body, header) {
   if (!secret || !header) return false
@@ -29,6 +36,15 @@ async function verifySignature(secret, body, header) {
 // Mint a contents:read clone token, boot a box, and fire-and-forget the in-box reviewer
 // (exec returns an execution_id immediately; the box runs for minutes and calls /publish).
 async function startReview(env, url, keys, { repo, owner, name, prNumber, headSha, baseRef, installationId }) {
+  // Immediately post an "in progress" sticky so the PR shows the review has started; /publish
+  // PATCHes this same marker comment into the findings (one comment, not two).
+  try {
+    const { token: writeToken } = await mintToken({ appId: env.APP_ID, privateKey: env.APP_PRIVATE_KEY, owner, repo: name, permissions: { pull_requests: 'write', metadata: 'read' } })
+    await upsertComment({ repo, pr: prNumber, token: writeToken, body: IN_PROGRESS })
+  } catch {
+    /* non-fatal — the review still runs and posts the result */
+  }
+
   const { token: cloneToken } = await mintToken({
     appId: env.APP_ID,
     privateKey: env.APP_PRIVATE_KEY,
