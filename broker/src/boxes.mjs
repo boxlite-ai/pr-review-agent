@@ -30,6 +30,11 @@ export async function createBox(apiKey, url, name) {
     cpus: 2,
     memory_mib: 4096,
     network: { mode: 'enabled' }, // open egress: npm + api.anthropic.com + github (harden later)
+    // The Worker fires the review and disconnects (it can't hold a socket for minutes). Without
+    // detach the box would auto-stop when that parent connection exits and kill the review.
+    detach: true,
+    // Self-remove if the box ever idles out without /publish reaping it (orphan safety net).
+    auto_remove: true,
   })
 }
 
