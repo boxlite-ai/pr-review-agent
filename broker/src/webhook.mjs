@@ -1,6 +1,6 @@
-// GitHub App webhook — the trigger for the runner. Two jobs:
-//   • pull_request (opened/synchronize/reopened/ready_for_review) → boot a box and
-//     fire-and-forget the in-box reviewer, which calls back to /publish.
+// GitHub App webhook — the trigger for the runner:
+//   • pull_request (opened/synchronize/reopened/ready_for_review, non-draft) → review
+//   • issue_comment "@boxlite-agent review" on a PR, by a maintainer → review (drafts allowed)
 //   • installation.deleted → drop the stored keys.
 // Payload authenticity is verified with the App's webhook secret (HMAC-SHA256).
 import { BrokerError } from './claims.mjs'
@@ -8,6 +8,12 @@ import { loadKeys, deleteKeys } from './store.mjs'
 import { mintToken } from './mint.mjs'
 import { mintJob } from './job.mjs'
 import { createBox, startExecution } from './boxes.mjs'
+
+const TRIGGER = '@boxlite-agent review'
+const PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review'])
+const ALLOWED_ASSOC = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']) // only maintainers may hand-trigger
+const GH = 'https://api.github.com'
+const ghHeaders = (token) => ({ Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'boxlite-agent', 'X-GitHub-Api-Version': '2022-11-28' })
 
 async function verifySignature(secret, body, header) {
   if (!secret || !header) return false
@@ -20,7 +26,37 @@ async function verifySignature(secret, body, header) {
   return diff === 0
 }
 
-const PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review'])
+// Mint a contents:read clone token, boot a box, and fire-and-forget the in-box reviewer
+// (exec returns an execution_id immediately; the box runs for minutes and calls /publish).
+async function startReview(env, url, keys, { repo, owner, name, prNumber, headSha, baseRef, installationId }) {
+  const { token: cloneToken } = await mintToken({
+    appId: env.APP_ID,
+    privateKey: env.APP_PRIVATE_KEY,
+    owner,
+    repo: name,
+    permissions: { contents: 'read', metadata: 'read' },
+  })
+  const box = await createBox(keys.boxliteKey, env.BOXLITE_URL, `pr-review-${name}-${prNumber}`.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 60))
+  const boxId = box.id || box.name
+  const job = await mintJob(env.STORE_SECRET, { repo, pr: prNumber, headSha, baseRef, boxId, installationId })
+  await startExecution(keys.boxliteKey, env.BOXLITE_URL, boxId, {
+    command: 'bash',
+    args: ['-lc', 'curl -fsS "$BROKER/reviewer.mjs" -o /tmp/r.mjs && node /tmp/r.mjs'],
+    env: {
+      REPO: repo,
+      PR: String(prNumber),
+      HEAD_SHA: headSha,
+      BASE_REF: baseRef,
+      GH_CLONE_TOKEN: cloneToken,
+      CLAUDE_CODE_OAUTH_TOKEN: keys.claudeToken,
+      JOB_TOKEN: job,
+      BROKER: url.origin,
+      BOX_ID: boxId,
+    },
+    timeoutSeconds: 900,
+  })
+  return boxId
+}
 
 export async function handleWebhook(request, env, url) {
   const body = await request.text()
@@ -36,52 +72,38 @@ export async function handleWebhook(request, env, url) {
     return new Response('keys dropped', { status: 200 })
   }
 
+  // Manual re-trigger: "@boxlite-agent review" comment on a PR, from a maintainer. Reviews
+  // even drafts — an explicit request is explicit intent.
+  if (event === 'issue_comment') {
+    if (payload.action !== 'created' || !payload.issue?.pull_request) return new Response('ignored', { status: 200 })
+    if (!String(payload.comment?.body || '').toLowerCase().includes(TRIGGER)) return new Response('no trigger phrase', { status: 200 })
+    if (!ALLOWED_ASSOC.has(payload.comment?.author_association)) return new Response('commenter not authorized', { status: 200 })
+    const repo = payload.repository.full_name
+    const [owner, name] = repo.split('/')
+    const keys = await loadKeys(env, installationId)
+    if (!keys) return new Response('not configured — run /setup once to store keys', { status: 200 })
+    const { token } = await mintToken({
+      appId: env.APP_ID,
+      privateKey: env.APP_PRIVATE_KEY,
+      owner,
+      repo: name,
+      permissions: { pull_requests: 'write', contents: 'read', metadata: 'read' },
+    })
+    const prNumber = payload.issue.number
+    await fetch(`${GH}/repos/${repo}/issues/comments/${payload.comment.id}/reactions`, { method: 'POST', headers: ghHeaders(token), body: JSON.stringify({ content: 'eyes' }) }).catch(() => {})
+    const pr = await fetch(`${GH}/repos/${repo}/pulls/${prNumber}`, { headers: ghHeaders(token) }).then((r) => r.json())
+    if (!pr?.head?.sha) throw new BrokerError(502, `could not fetch ${repo}#${prNumber}`)
+    const boxId = await startReview(env, url, keys, { repo, owner, name, prNumber, headSha: pr.head.sha, baseRef: pr.base.ref, installationId })
+    return new Response(`review started via @mention: ${repo}#${prNumber} in box ${boxId}`, { status: 200 })
+  }
+
   if (event !== 'pull_request' || !PR_ACTIONS.has(payload.action)) return new Response('ignored', { status: 200 })
   const pr = payload.pull_request
-  if (pr.draft) return new Response('draft — skipped', { status: 200 })
-
+  if (pr.draft) return new Response('draft — skipped (comment "@boxlite-agent review" to force)', { status: 200 })
   const repo = payload.repository.full_name
   const [owner, name] = repo.split('/')
   const keys = await loadKeys(env, installationId)
   if (!keys) return new Response('not configured — run /setup once to store keys', { status: 200 })
-
-  // contents:read clone token for the box; the PR-write token is minted at /publish.
-  const { token: cloneToken } = await mintToken({
-    appId: env.APP_ID,
-    privateKey: env.APP_PRIVATE_KEY,
-    owner,
-    repo: name,
-    permissions: { contents: 'read', metadata: 'read' },
-  })
-
-  const box = await createBox(keys.boxliteKey, env.BOXLITE_URL, `pr-review-${name}-${pr.number}`.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 60))
-  const boxId = box.id || box.name
-  const job = await mintJob(env.STORE_SECRET, {
-    repo,
-    pr: pr.number,
-    headSha: pr.head.sha,
-    baseRef: pr.base.ref,
-    boxId,
-    installationId,
-  })
-
-  // Fire-and-forget: exec returns an execution_id immediately; the box runs for minutes and
-  // calls /publish. We never attach.
-  await startExecution(keys.boxliteKey, env.BOXLITE_URL, boxId, {
-    command: 'bash',
-    args: ['-lc', 'curl -fsS "$BROKER/reviewer.mjs" -o /tmp/r.mjs && node /tmp/r.mjs'],
-    env: {
-      REPO: repo,
-      PR: String(pr.number),
-      HEAD_SHA: pr.head.sha,
-      BASE_REF: pr.base.ref,
-      GH_CLONE_TOKEN: cloneToken,
-      CLAUDE_CODE_OAUTH_TOKEN: keys.claudeToken,
-      JOB_TOKEN: job,
-      BROKER: url.origin,
-      BOX_ID: boxId,
-    },
-    timeoutSeconds: 900,
-  })
+  const boxId = await startReview(env, url, keys, { repo, owner, name, prNumber: pr.number, headSha: pr.head.sha, baseRef: pr.base.ref, installationId })
   return new Response(`review started: ${repo}#${pr.number} in box ${boxId}`, { status: 200 })
 }
