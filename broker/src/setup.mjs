@@ -74,10 +74,11 @@ async function setRepoSecret(owner, repo, name, value, token) {
   })
 }
 
-async function commitWorkflow(owner, repo, token, workflow) {
+async function putWorkflow(owner, repo, token, workflow, branch) {
   let sha
+  const ref = branch ? `?ref=${branch}` : ''
   try {
-    sha = (await gh(`/repos/${owner}/${repo}/contents/${WORKFLOW_PATH}`, token)).sha
+    sha = (await gh(`/repos/${owner}/${repo}/contents/${WORKFLOW_PATH}${ref}`, token)).sha
   } catch {
     /* file doesn't exist yet */
   }
@@ -86,9 +87,50 @@ async function commitWorkflow(owner, repo, token, workflow) {
     body: JSON.stringify({
       message: 'ci: add BoxLite PR review workflow',
       content: btoa(workflow),
+      ...(branch ? { branch } : {}),
       ...(sha ? { sha } : {}),
     }),
   })
+}
+
+/**
+ * Add the review workflow. Tries a direct commit to the default branch; if that repo
+ * protects its default branch (409 — required PRs / status checks / merge queue), falls
+ * back to a branch + pull request the maintainer merges. Returns 'committed' or 'pr'.
+ */
+async function commitWorkflow(owner, repo, token, workflow) {
+  try {
+    await putWorkflow(owner, repo, token, workflow)
+    return 'committed'
+  } catch (e) {
+    if (!(e instanceof BrokerError) || e.status !== 409) throw e
+  }
+  const base = (await gh(`/repos/${owner}/${repo}`, token)).default_branch
+  const baseSha = (await gh(`/repos/${owner}/${repo}/git/ref/heads/${base}`, token)).object.sha
+  const branch = 'boxlite-review-setup'
+  await gh(`/repos/${owner}/${repo}/git/refs`, token, {
+    method: 'POST',
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseSha }),
+  }).catch(async (e) => {
+    if (!(e instanceof BrokerError) || e.status !== 422) throw e // 422 = branch exists → reuse it
+    await gh(`/repos/${owner}/${repo}/git/refs/heads/${branch}`, token, {
+      method: 'PATCH',
+      body: JSON.stringify({ sha: baseSha, force: true }),
+    })
+  })
+  await putWorkflow(owner, repo, token, workflow, branch)
+  await gh(`/repos/${owner}/${repo}/pulls`, token, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'ci: add BoxLite PR review workflow',
+      head: branch,
+      base,
+      body: 'Your default branch is protected, so BoxLite is adding its reviewer workflow via this PR. Merge it to enable `@boxlite-agent` reviews.',
+    }),
+  }).catch((e) => {
+    if (!(e instanceof BrokerError) || e.status !== 422) throw e // 422 = PR already open
+  })
+  return 'pr'
 }
 
 /** GitHub App Setup URL handler: GET shows the form, POST configures the installation. */
