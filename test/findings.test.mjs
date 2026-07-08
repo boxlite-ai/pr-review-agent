@@ -14,6 +14,11 @@ test('parseReview unwraps a ```json fence', () => {
   assert.equal(r.verdict, 'looks good')
 })
 
+test('parseReview tolerates a prose preamble before a fenced object (the dune#1 failure)', () => {
+  const r = parseReview('Not even exported/used elsewhere.\n\n```json\n{"verdict":"1 issue","findings":[]}\n```')
+  assert.equal(r.verdict, '1 issue')
+})
+
 test('parseReview throws a clear error on non-JSON and on empty', () => {
   assert.throws(() => parseReview('the code looks fine'), /not JSON/)
   assert.throws(() => parseReview('   '), /empty/)

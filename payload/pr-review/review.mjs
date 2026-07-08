@@ -38,14 +38,19 @@ export function buildPrompt({ basePrompt, repo, pr, baseRef, shortHead, env = {}
   return lines.join('\n')
 }
 
-/** Fail fast if the model didn't emit a JSON object. Returns the text unchanged. */
+/**
+ * Extract the review JSON object from the model's reply, tolerating a prose preamble
+ * and/or a ```json fence (models often explain, then emit the object). Returns a clean,
+ * re-serialized JSON string; throws if no JSON object is parseable.
+ */
 export function precheckJson(text) {
-  const unfenced = String(text)
-    .trim()
-    .replace(/^```(?:json)?\s*\n?/, '')
-    .replace(/\n?```$/, '')
-  JSON.parse(unfenced) // throws on non-JSON
-  return text
+  const raw = String(text)
+  const fenced = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/i)
+  const scope = fenced ? fenced[1] : raw
+  const start = scope.indexOf('{')
+  const end = scope.lastIndexOf('}')
+  if (start === -1 || end <= start) throw new Error('no JSON object in model output')
+  return JSON.stringify(JSON.parse(scope.slice(start, end + 1))) // validate + strip prose/fence
 }
 
 function main() {
@@ -116,14 +121,15 @@ function main() {
     console.error(String(res.stdout).slice(0, 4000))
     process.exit(1)
   }
+  let clean
   try {
-    precheckJson(result)
+    clean = precheckJson(result)
   } catch (e) {
     console.error(`model did not emit review JSON: ${e.message}`)
     console.error(String(result).slice(0, 4000))
     process.exit(1)
   }
-  process.stdout.write(result)
+  process.stdout.write(clean)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

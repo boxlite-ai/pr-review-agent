@@ -32,12 +32,16 @@ test('buildPrompt reflects the review profile', () => {
   assert.match(lean, /Review for signal/)
 })
 
-test('precheckJson accepts a JSON object, bare or fenced', () => {
+test('precheckJson extracts the JSON object — bare, fenced, or after a prose preamble', () => {
   const bare = '{"verdict":"looks good","findings":[]}'
   assert.equal(precheckJson(bare), bare)
 
-  const fenced = '```json\n{"verdict":"1 issue"}\n```'
-  assert.equal(precheckJson(fenced), fenced) // returned unchanged; only validated
+  // a ```json fence is unwrapped to the bare object
+  assert.equal(precheckJson('```json\n{"verdict":"1 issue"}\n```'), '{"verdict":"1 issue"}')
+
+  // the live failure on boxlite-ai/dune#1: the model explained first, THEN emitted the fence.
+  const withPreamble = 'Not even exported/used elsewhere, and no test exists.\n\n```json\n{"verdict":"1 issue","findings":[]}\n```'
+  assert.equal(precheckJson(withPreamble), '{"verdict":"1 issue","findings":[]}')
 })
 
 test('precheckJson throws on non-JSON (the fail-fast the box relies on)', () => {
