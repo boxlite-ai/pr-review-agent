@@ -14,24 +14,33 @@ import { BrokerError } from './claims.mjs'
 
 const GH = 'https://api.github.com'
 const WORKFLOW_PATH = '.github/workflows/boxlite-review.yml'
-const WORKFLOW = `name: boxlite-review
+/**
+ * The review workflow written into each installed repo. `brokerUrl` (this Worker's own
+ * origin) + `id-token: write` make runs post as @boxlite-agent[bot]: the action exchanges
+ * the run's GitHub OIDC token at the broker for a repo-scoped installation token.
+ */
+function buildWorkflow(brokerUrl) {
+  return `name: boxlite-review
 on:
   pull_request: { types: [opened, synchronize, reopened, ready_for_review] }
   issue_comment: { types: [created] }
-permissions: { contents: read, pull-requests: write, checks: write }
+permissions: { contents: read, pull-requests: write, checks: write, id-token: write }
 jobs:
   review:
     if: >-
       (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
-       contains(github.event.comment.body, '@boxlite review'))
+       contains(github.event.comment.body, '@boxlite-agent review'))
     runs-on: ubuntu-latest
     steps:
       - uses: boxlite-ai/pr-review-agent@v1
         with:
           boxlite-api-key: \${{ secrets.BOXLITE_API_KEY }}
           claude-code-oauth-token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          broker-url: ${brokerUrl}
+          trigger-phrase: '@boxlite-agent review'
 `
+}
 
 async function gh(path, token, init = {}) {
   const res = await fetch(`${GH}${path}`, {
@@ -65,7 +74,7 @@ async function setRepoSecret(owner, repo, name, value, token) {
   })
 }
 
-async function commitWorkflow(owner, repo, token) {
+async function commitWorkflow(owner, repo, token, workflow) {
   let sha
   try {
     sha = (await gh(`/repos/${owner}/${repo}/contents/${WORKFLOW_PATH}`, token)).sha
@@ -76,7 +85,7 @@ async function commitWorkflow(owner, repo, token) {
     method: 'PUT',
     body: JSON.stringify({
       message: 'ci: add BoxLite PR review workflow',
-      content: btoa(WORKFLOW),
+      content: btoa(workflow),
       ...(sha ? { sha } : {}),
     }),
   })
@@ -99,12 +108,13 @@ export async function handleSetup(request, env, url) {
   const auth = createAppAuth({ appId: env.APP_ID, privateKey: env.APP_PRIVATE_KEY })
   const { token } = await auth({ type: 'installation', installationId: Number(installationId) })
 
+  const workflow = buildWorkflow(url.origin) // broker-url = this Worker → @boxlite-agent[bot] runs
   const { repositories } = await gh('/installation/repositories?per_page=100', token)
   const configured = []
   for (const r of repositories) {
     await setRepoSecret(r.owner.login, r.name, 'BOXLITE_API_KEY', boxliteKey, token)
     await setRepoSecret(r.owner.login, r.name, 'CLAUDE_CODE_OAUTH_TOKEN', claudeToken, token)
-    await commitWorkflow(r.owner.login, r.name, token)
+    await commitWorkflow(r.owner.login, r.name, token, workflow)
     configured.push(r.full_name)
   }
   return html(donePage(configured))
