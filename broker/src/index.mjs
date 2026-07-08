@@ -11,35 +11,44 @@
 import { verifyOidc } from './verify.mjs'
 import { resolveTarget, BrokerError } from './claims.mjs'
 import { mintToken } from './mint.mjs'
+import { handleSetup } from './setup.mjs'
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
-    if (request.method !== 'POST' || url.pathname !== '/exchange') {
-      return json(404, { error: 'POST /exchange' })
-    }
     try {
-      const bearer = (request.headers.get('authorization') || '').match(/^Bearer (.+)$/)
-      if (!bearer) throw new BrokerError(401, 'missing OIDC bearer token')
-
-      // The audience the caller must have requested — anti-replay binding to this broker.
-      const audience = env.BROKER_AUDIENCE || url.origin
-
-      const claims = await verifyOidc(bearer[1], { audience })
-      const { owner, repo } = resolveTarget(claims, { audience })
-      const { token, expiresAt } = await mintToken({
-        appId: env.APP_ID,
-        privateKey: env.APP_PRIVATE_KEY,
-        owner,
-        repo,
-      })
-      // Never log the token or key. Return only the scoped token to the caller.
-      return json(200, { token, expires_at: expiresAt, repository: `${owner}/${repo}` })
+      // Auto-configure: the App's post-install Setup URL — writes the secrets + review
+      // workflow into the just-installed repos so the user does zero manual setup.
+      if (url.pathname === '/setup') return await handleSetup(request, env, url)
+      // OIDC → short-lived @boxlite[bot] token, scoped to the caller's own repo.
+      if (request.method === 'POST' && url.pathname === '/exchange') {
+        return await handleExchange(request, env, url)
+      }
+      return json(404, { error: 'POST /exchange or GET|POST /setup' })
     } catch (error) {
       const status = error instanceof BrokerError ? error.status : 401
       return json(status, { error: error.message })
     }
   },
+}
+
+async function handleExchange(request, env, url) {
+  const bearer = (request.headers.get('authorization') || '').match(/^Bearer (.+)$/)
+  if (!bearer) throw new BrokerError(401, 'missing OIDC bearer token')
+
+  // The audience the caller must have requested — anti-replay binding to this broker.
+  const audience = env.BROKER_AUDIENCE || url.origin
+
+  const claims = await verifyOidc(bearer[1], { audience })
+  const { owner, repo } = resolveTarget(claims, { audience })
+  const { token, expiresAt } = await mintToken({
+    appId: env.APP_ID,
+    privateKey: env.APP_PRIVATE_KEY,
+    owner,
+    repo,
+  })
+  // Never log the token or key. Return only the scoped token to the caller.
+  return json(200, { token, expires_at: expiresAt, repository: `${owner}/${repo}` })
 }
 
 function json(status, body) {

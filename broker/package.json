@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@octokit/auth-app": "^7",
-    "jose": "^5"
+    "jose": "^5",
+    "libsodium-wrappers": "^0.7"
   },
   "devDependencies": {
     "wrangler": "^3"
