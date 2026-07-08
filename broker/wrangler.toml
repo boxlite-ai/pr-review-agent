@@ -15,3 +15,9 @@ compatibility_flags = ["nodejs_compat"]
 [[kv_namespaces]]
 binding = "INSTALL_STORE"
 id = "1e6ad264b43943118256f765b20ed9f3"
+
+# The in-box reviewer is imported as a string (served at /reviewer.mjs), not bundled as JS.
+[[rules]]
+type = "Text"
+globs = ["**/*.txt"]
+fallthrough = false

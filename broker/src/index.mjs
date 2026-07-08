@@ -1,63 +1,39 @@
-// BoxLite token broker — a Cloudflare Worker that turns a caller's GitHub Actions OIDC
-// token into a short-lived, repo-scoped @boxlite[bot] installation token, WITHOUT ever
-// handing out the App private key. This is what lets a public App review anyone's PRs as
-// its branded bot: the key lives only here; each run gets a token scoped to its own repo.
+// BoxLite PR reviewer — webhook runner. A GitHub App webhook triggers a review; the broker
+// boots a BoxLite box that runs Claude, and the box calls back to /publish. No per-repo
+// workflow file, no repo secrets — the App + this Worker are the whole system.
 //
-//   POST /exchange   Authorization: Bearer <GitHub Actions OIDC JWT>
-//   → 200 { token, expires_at, repository }
+//   POST /webhook      GitHub App webhook (pull_request → run; installation.deleted → forget)
+//   POST /publish      box callback: post the review as @boxlite-agent[bot], reap the box
+//   GET  /reviewer.mjs the in-box reviewer script (fetched + run by each box)
+//   GET|POST /setup    one-time: store this installation's BoxLite + Claude keys (encrypted)
 //
-// Env (Worker secrets/vars): APP_ID, APP_PRIVATE_KEY (PKCS#8 — see broker/README.md),
-// BROKER_AUDIENCE (this Worker's public URL; the value callers must set as the OIDC audience).
-import { verifyOidc } from './verify.mjs'
-import { resolveTarget, BrokerError } from './claims.mjs'
-import { mintToken } from './mint.mjs'
+// Env: APP_ID, APP_PRIVATE_KEY (PKCS#8), WEBHOOK_SECRET, STORE_SECRET, BOXLITE_URL;
+// KV: INSTALL_STORE.
+import { BrokerError } from './claims.mjs'
 import { handleSetup } from './setup.mjs'
 import { handleWebhook } from './webhook.mjs'
+import { handlePublish } from './publish-handler.mjs'
+import REVIEWER_SRC from './reviewer.js.txt' // wrangler Text rule → imported as a string
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
     try {
-      // Auto-configure: the App's post-install Setup URL — writes the secrets + review
-      // workflow into the just-installed repos so the user does zero manual setup.
-      if (url.pathname === '/setup') return await handleSetup(request, env, url)
-      // GitHub App webhook — auto-configure repos on install / repos-added (uses stored keys).
-      if (request.method === 'POST' && url.pathname === '/webhook') return await handleWebhook(request, env, url)
-      // OIDC → short-lived @boxlite[bot] token, scoped to the caller's own repo.
-      if (request.method === 'POST' && url.pathname === '/exchange') {
-        return await handleExchange(request, env, url)
+      if (url.pathname === '/reviewer.mjs') {
+        return new Response(REVIEWER_SRC, { headers: { 'content-type': 'application/javascript; charset=utf-8' } })
       }
-      return json(404, { error: 'POST /exchange or GET|POST /setup' })
+      if (url.pathname === '/setup') return await handleSetup(request, env, url)
+      if (request.method === 'POST' && url.pathname === '/webhook') return await handleWebhook(request, env, url)
+      if (request.method === 'POST' && url.pathname === '/publish') return await handlePublish(request, env, url)
+      return json(404, { error: 'GET /setup · POST /webhook · POST /publish · GET /reviewer.mjs' })
     } catch (error) {
-      const status = error instanceof BrokerError ? error.status : 401
+      const status = error instanceof BrokerError ? error.status : 500
       console.error(`[broker] ${url.pathname} → ${status}: ${error.stack || error.message}`)
       return json(status, { error: error.message })
     }
   },
 }
 
-async function handleExchange(request, env, url) {
-  const bearer = (request.headers.get('authorization') || '').match(/^Bearer (.+)$/)
-  if (!bearer) throw new BrokerError(401, 'missing OIDC bearer token')
-
-  // The audience the caller must have requested — anti-replay binding to this broker.
-  const audience = env.BROKER_AUDIENCE || url.origin
-
-  const claims = await verifyOidc(bearer[1], { audience })
-  const { owner, repo } = resolveTarget(claims, { audience })
-  const { token, expiresAt } = await mintToken({
-    appId: env.APP_ID,
-    privateKey: env.APP_PRIVATE_KEY,
-    owner,
-    repo,
-  })
-  // Never log the token or key. Return only the scoped token to the caller.
-  return json(200, { token, expires_at: expiresAt, repository: `${owner}/${repo}` })
-}
-
 function json(status, body) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }

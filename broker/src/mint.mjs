@@ -10,7 +10,7 @@ const GH_API = 'https://api.github.com'
 /**
  * @returns {{ token: string, expiresAt: string }}
  */
-export async function mintToken({ appId, privateKey, owner, repo }) {
+export async function mintToken({ appId, privateKey, owner, repo, permissions = TOKEN_PERMISSIONS }) {
   if (!appId || !privateKey) throw new BrokerError(500, 'broker app credentials not configured')
   const auth = createAppAuth({ appId, privateKey })
 
@@ -33,7 +33,7 @@ export async function mintToken({ appId, privateKey, owner, repo }) {
     type: 'installation',
     installationId,
     repositoryNames: [repo],
-    permissions: TOKEN_PERMISSIONS,
+    permissions,
   })
   return { token: installation.token, expiresAt: installation.expiresAt }
 }
